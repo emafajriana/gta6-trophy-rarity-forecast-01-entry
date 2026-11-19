@@ -1,74 +1,54 @@
-#!/usr/bin/env python3
-"""GTA VI trophy earn-rate forecaster (gta6-trophy-rarity-forecast-01).
+"""gta6-trophy-rarity-forecast-01 entry: a launch-week trophy forecaster.
 
-Reads one case at a time from the input directory and, for each of the
-game's trophies, writes five quantiles (5%, 25%, 50%, 75%, 95%) of that
-trophy's Exophase earn rate at the case's target, in percent.
+Reads one case (schema makefun/gta6-trophies-case/v1): every read the
+house made of GTA VI's Exophase trophy page before the checkpoint, each
+read holding all 55 trophies' earn rates in percent and the tracked
+player count. Writes, per trophy, five quantiles of its earn rate at
+the case's target, scored by pinball loss on the logit scale.
 
-The case is the house's recording of Exophase's GTA VI PlayStation 5
-trophy page: `trophies` (id, name, description, tier, points, secret)
-and `history`, every read before the case's cut, oldest first, each
-{slot, at, players_tracked, trophies_earned, rates} with `rates` in
-percent in the trophies' order (null where a read lacked the trophy).
-The score is a pinball loss on the logit scale (rates clamped to
-0.01..99.99 percent before the logit), so all modelling is done in
-logit space and the output is converted back to percent at the end.
+The model, per trophy:
 
-Two facts about the data-generating process drive the design, both
-stated in the kit's own rules (RULES.txt):
+  * The page only changes when Exophase refreshes it, and a refresh
+    dilutes every rate at once (the tracked population jumps while the
+    earners are still the old cohort's). Between refreshes the rates
+    themselves climb as players progress. So the series a case holds
+    is a step-and-climb curve, and the fit works on the rates directly:
+    logit(rate) against ln(1 + hours since launch), by recency-weighted
+    least squares, each trophy's slope shrunk toward the pooled slope
+    of all 55 (a single trophy's two days of reads are too quantised
+    to trust alone; the pool is the week's common clock).
+  * Extrapolation averages two saturating paths, because each alone
+    fails one way: an exponential approach to a tier ceiling (Platinum
+    1%, Gold 5%, Silver 30%, Bronze 85%) that bends the logit line
+    toward the ceiling at the fitted slope, and the same line damped
+    by 0.9 and hard-capped at the ceiling. A negative slope (dilution
+    still winning) is kept but halved, never extrapolated at full
+    strength.
+  * Medians are then kept honest across trophies: walking down the
+    last read's ranking, no trophy's median may pass the trophy ahead
+    of it by more than 0.10 logit; the Platinum's median is capped at
+    the lowest other median (nobody platinum out-earns the rarest
+    ordinary trophy by much, and never above it), and a 100%-completion
+    trophy's median is capped at 2%.
+  * The spread is a logit-normal sigma: a 0.30 base, 0.18 per unit of
+    log-time extrapolation and the trophy's own fit residual, combined
+    in quadrature, plus a rarity bump for the heavily quantised low
+    rates.
+  * Short horizons carry one more risk the trend cannot see: a refresh
+    landing between the checkpoint and the target. For horizons under
+    a day the forecast is a two-component mixture on the logit scale:
+    with weight w the page refreshes (every rate diluted by the
+    expected population jump, partly offset because the new cohort
+    earns too) and with weight 1 - w it does not. w comes from the
+    page's staleness against the observed refresh cadence; the jump
+    comes from the jumps in the case's own history, decayed toward 1,
+    or a launch-week prior of about 6x when no refresh has been seen
+    yet (launch night: 638 tracked players became 3,868 at the first
+    refresh). The 100% trophy is exempt: a refresh does not dilute it.
 
-1. Exophase refreshes a game's counts on its own schedule, hours apart,
-   not continuously. A read shows the rates as of Exophase's last
-   refresh before it. Between refreshes the page is frozen: the history
-   is a step function, flat for hours, then jumping. A rate is
-   earners / players_tracked, so a refresh moves every rate at once:
-   the tracked population jumps (launch night: 638 -> 3,868 players)
-   and every rate but the one at 100% falls, because the newly tracked
-   players hold fewer trophies. The forecast is therefore fitted
-   directly to the rates, in logit space against ln(1 + hours since
-   launch): a refresh's dilution shows up in the rates at once, and
-   the slope absorbs it. (An earners / players decomposition —
-   extrapolate log earners and log players separately, then divide —
-   was tried first and lost decisively on synthetic validation in
-   every regime: the players series is a step function, so its
-   extrapolation is the noisiest part of the forecast. It was removed.)
-2. The practice cases straddle the first refresh: their histories are
-   the flat launch night and their answers the refreshed page. So when
-   a case's history is one long flat plateau and the horizon is short
-   next to the refresh cadence, the forecast must cover TWO outcomes:
-   no refresh (rates stay) or a refresh (rates fall by about the jump
-   factor). The program therefore mixes the two: with probability p
-   (from the staleness of the last read against the refresh cadence) the
-   median is shifted down by the refresh factor, and the quantiles are
-   the quantiles of that two-component mixture. Over a long horizon
-   (the final: 4.5 days, dozens of refreshes) the mixture collapses to
-   the smooth earners / players forecast, because refreshes average out.
-
-Within the smooth forecast, per trophy: logit(rate) is fitted against
-ln(1 + hours since launch) by recency-weighted least squares, and the
-earners series is fitted the same way in log space; both slopes are
-shrunk toward a pooled slope across all trophies, so a trophy with two
-noisy reads cannot run away on its own. (Rates are printed to two
-decimals and the tracked population is small at launch, so a 0.10%
-versus 0.13% gap is mostly quantisation noise.) Extrapolation to the
-target averages two saturating shapes in log-time: an exponential
-approach to the trophy's ceiling (by tier: platinum 1%, gold 5%,
-silver 30%, bronze 85%, and never below 1.5x the last rate) and a
-damped straight line capped at that ceiling. A trophy whose rate is
-falling is allowed to keep falling, but only mildly. Cross-trophy
-structure: a trophy that was ahead of another at the last read is not
-allowed to fall far behind it by the target; the Platinum is capped at
-the lowest other trophy, and the 100%-completion trophy at 2%.
-Quantiles are honest normal quantiles on the logit scale around the
-median, widening with extrapolation distance, with the trophy's
-residual volatility, and for rare trophies and trophies with very few
-reads. A too-narrow forecast is punished hard by pinball loss whenever
-the truth lands outside it, so the spread is deliberately not thin.
-
-Standard library only. Deterministic: same case in, same bytes out.
-Input/output directories come from MAKEFUN_INPUT_DIR / MAKEFUN_OUTPUT_DIR
-when set, else /input and /output. Every *.in file in the input directory
-is processed in name order; each writes <id>.out next to it.
+Standard library only, deterministic, no network. Runs as
+`python3 -P -s main.py` with MAKEFUN_INPUT_DIR / MAKEFUN_OUTPUT_DIR
+standing in for /input and /output outside the grader.
 """
 
 import json
@@ -76,442 +56,380 @@ import math
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
-QUANTILES = [0.05, 0.25, 0.5, 0.75, 0.95]
-# Standard normal quantiles at the five levels.
-Z = [-1.644854, -0.674490, 0.0, 0.674490, 1.644854]
+# The grader's -P leaves this file's directory off sys.path; restore it
+# first so a module shipped beside main.py would import.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-LAUNCH_DEFAULT = "2026-11-19T00:00:00Z"
+INPUT_DIR = Path(os.environ.get("MAKEFUN_INPUT_DIR", "/input"))
+OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 
-# --- tuning constants (chosen on synthetic validation; see work/validate.py) ---
-SHRINK_K = 3.0          # pseudo-count pulling each slope to the pooled slope
-MAX_READ_WEIGHT = 6.0    # effective reads counted per trophy for shrinkage
-SIGMA_BASE = 0.30        # logit-scale spread at zero extrapolation
-SIGMA_PER_DX = 0.18      # extra spread per unit of log-time extrapolation
-SIGMA_STEP = 0.10        # extra spread when the history is step-like
-SIGMA_MIN = 0.30
-SIGMA_MAX = 1.50
-P_FLOOR = 0.0001         # smallest fraction ever modelled (0.01 percent)
-P_CEIL = 0.9999
-DOMINANCE_SLACK = 0.10   # logit units a trophy may overtake its senior by
-COMPLETION_CAP = 0.02    # 100%-completion trophy median cap at the target
-# Refresh prior, from the kit's rules (RULES.txt): Exophase refreshes
-# "on its own schedule, hours apart"; the first refresh took the tracked
-# population from 638 to 3,868 players (about a sixfold jump) and every
-# rate but the one at 100% fell. Used only when a case's history shows
-# no refresh at all, so the jump size and cadence cannot be learned.
-REFRESH_CADENCE_PRIOR_H = 4.5
-REFRESH_JUMP_PRIOR = 6.0
-REFRESH_NEW_EARNER_BOOST = 1.10  # new cohort's earners, ex the 100% trophy
-TIER_CEILING = {"platinum": 0.01, "gold": 0.05,
-                "silver": 0.30, "bronze": 0.85}
-# Blend weight inside the rate fit: damped straight line vs
-# exponential approach to the ceiling (0.5 = even).
-LIN_W = 0.5
+LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
+# The standard normal's quantile at each level (the house's rounding).
+Z = [-1.645, -0.674, 0.0, 0.674, 1.645]
+
+# Rates are fitted as fractions clipped into this logit-safe range, so
+# a printed 0.00 or 100.00 stays a real read instead of dropping out.
+FRAC_LO = 0.00005
+FRAC_HI = 0.99995
+
+# Tier ceilings: the share of tracked players a trophy of each tier
+# can plausibly reach inside week one.
+CEILING = {"platinum": 0.01, "gold": 0.05, "silver": 0.30, "bronze": 0.85}
+CEILING_DEFAULT = 0.85
+COMPLETION_MEDIAN_CAP = 0.02  # a 100%-completion trophy, one week in
+
+# Fit: recency weighting and slope shrinkage toward the pooled slope.
+HALF_LIFE_H = 12.0        # a read's weight halves every 12h of age
+SHRINK_PSEUDO = 3.0       # pseudo-reads of pooled slope in the shrink
+SHRINK_WEIGHT_CAP = 6.0   # a trophy's own weight counts for at most 6
+
+# Extrapolation.
+LINE_DAMPING = 0.9        # the straight-line component's slope factor
+NEG_SLOPE_DAMPING = 0.5   # falling rates fall at half strength
+OVERTAKE_SLACK = 0.10     # logit a median may pass the trophy ahead
+SLOPE_EPS = 1e-9          # a slope this small is no slope at all
+
+# Spread.
+SIGMA_BASE = 0.30
+SIGMA_PER_DX = 0.18
+SIGMA_LO = 0.30
+SIGMA_HI = 1.50
+
+# Refresh mixture (short horizons only).
+REFRESH_MAX_HORIZON_H = 24.0
+REFRESH_PRIOR_CADENCE_H = 4.5   # launch-night refresh cadence
+REFRESH_PRIOR_JUMP = 6.0        # 638 -> ~3,900 tracked at refresh one
+REFRESH_JUMP_DECAY = 0.7        # each later jump's excess, times this
+DILUTION_EFFICIENCY = 0.85      # the new cohort earns some of it back
+REFRESH_WEIGHT_CAP = 0.90
+REFRESH_SIGMA_SCALE = 1.1
+
+LAUNCH_FALLBACK = datetime(2026, 11, 19, tzinfo=timezone.utc)
 
 
 def logit_frac(p):
+    """Log-odds of a fraction, clipped away from 0 and 1."""
     p = min(max(p, 1e-9), 1.0 - 1e-9)
     return math.log(p / (1.0 - p))
 
 
-def logit_pct(pct):
-    return logit_frac(min(max(pct, 0.01), 99.99) / 100.0)
-
-
-def sigmoid(y):
+def inv_logit(y):
+    """The fraction whose log-odds is y."""
     if y >= 0:
-        return 1.0 / (1.0 + math.exp(-y)) if y < 700 else 1.0
+        return 1.0 / (1.0 + math.exp(-y))
     e = math.exp(y)
     return e / (1.0 + e)
 
 
-def clamp(x, lo, hi):
-    return lo if x < lo else hi if x > hi else x
-
-
-def parse_time(value):
-    """ISO 8601 string, epoch seconds, or epoch milliseconds -> epoch secs."""
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        v = float(value)
-        if v > 1e12:
-            v /= 1000.0
-        return v
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return None
-        try:
-            return float(s)
-        except ValueError:
-            pass
-        try:
-            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.timestamp()
-        except ValueError:
-            return None
-    return None
-
-
 def round4(x):
-    """x rounded to 4 decimals, half up (the starter's rounding)."""
+    """x rounded to 4 decimals, half up, as JavaScript's Math.round.
+
+    A whole number comes back as an int, so json.dumps writes 100
+    where JavaScript writes 100 (not 100.0).
+    """
     scaled = x * 10000
     whole = math.floor(scaled)
     if scaled - whole >= 0.5:
         whole += 1
     value = whole / 10000
-    return int(value) if value == int(value) else value
+    return int(value) if value.is_integer() else value
+
+
+def _wls(xs, ys, ws):
+    """Weighted least squares y ~ a + b*x.
+
+    Returns (xbar, ybar, a, b, resid): the weighted centroid, the fit,
+    and the fit's residual standard deviation. A series with no x
+    spread fits flat through its weighted mean.
+    """
+    sw = sum(ws)
+    if sw <= 0:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+    xbar = sum(w * x for x, w in zip(xs, ws)) / sw
+    ybar = sum(w * y for y, w in zip(ys, ws)) / sw
+    sxx = sum(w * (x - xbar) ** 2 for x, w in zip(xs, ws))
+    sxy = sum(w * (x - xbar) * (y - ybar) for x, y, w in zip(xs, ys, ws))
+    b = sxy / sxx if sxx > 1e-12 else 0.0
+    a = ybar - b * xbar
+    sse = sum(w * (y - a - b * x) ** 2 for x, y, w in zip(xs, ys, ws))
+    dof = sw - 2.0
+    if dof < 1.0:
+        dof = max(sw, 1.0)
+    return xbar, ybar, a, b, math.sqrt(sse / dof)
+
+
+def _ols(xs, ys, ws):
+    """Weighted least squares as (intercept, slope, residual SD)."""
+    _, _, a, b, resid = _wls(xs, ys, ws)
+    return a, b, resid
 
 
 def _norm_cdf(z):
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
-def mixture_quantiles(m0, s0, m1, p1, taus):
-    """Quantiles of a two-component normal mixture on the logit scale.
-
-    Component 0 (weight 1-p1) is N(m0, s0); component 1 (weight p1) is
-    N(m1, s0). Each tau is inverted by bisection on the mixture CDF.
-    """
-    lo = min(m0, m1) - 5.0 * s0 - 0.5
-    hi = max(m0, m1) + 5.0 * s0 + 0.5
-
-    def cdf(y):
-        return (1.0 - p1) * _norm_cdf((y - m0) / s0) \
-            + p1 * _norm_cdf((y - m1) / s0)
-
-    out = []
-    for tau in taus:
-        a, b = lo, hi
-        for _ in range(60):
-            mid = 0.5 * (a + b)
-            if cdf(mid) < tau:
-                a = mid
-            else:
-                b = mid
-        out.append(0.5 * (a + b))
-    return out
+def _parse_time(text):
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
-def _ols(xs, ys, ws):
-    """Weighted least squares y ~ a + b*x; returns (a, b, resid_std)."""
-    sw = sum(ws)
-    if sw <= 0 or len(xs) < 2:
-        return None
-    mx = sum(w * x for w, x in zip(ws, xs)) / sw
-    my = sum(w * y for w, y in zip(ws, ys)) / sw
-    sxx = sum(w * (x - mx) ** 2 for w, x in zip(ws, xs))
-    if sxx <= 1e-12:
-        return (my, 0.0, 0.0)
-    sxy = sum(w * (x - mx) * (y - my) for w, x, y in zip(ws, xs, ys))
-    b = sxy / sxx
-    a = my - b * mx
-    resid = [y - (a + b * x) for x, y in zip(xs, ys)]
-    var = sum(w * r * r for w, r in zip(ws, resid)) / sw
-    dof = max(len(xs) - 2, 1)
-    resid_std = math.sqrt(var * len(xs) / dof) if len(xs) > 2 else 0.0
-    return (a, b, resid_std)
-
-
-def _weighted_median(pairs):
-    pairs = sorted(pairs)
-    total = sum(w for _, w in pairs)
-    if total <= 0:
-        return 0.0
-    acc = 0.0
-    for v, w in pairs:
-        acc += w
-        if acc >= total / 2.0:
-            return v
-    return pairs[-1][0]
-
-
-def _ceiling(tier, name, p_last):
-    base = TIER_CEILING.get((tier or "").lower(), 0.85)
-    # A trophy already above its tier ceiling keeps a ceiling above it.
-    return max(base, min(0.99, 1.5 * p_last))
-
-
-def _is_platinum(trophy):
-    return (trophy.get("tier") or "").lower() == "platinum" \
-        or "platinum" in (trophy.get("name") or "").lower()
+def _launch_of(case):
+    """Midnight UTC on the game's release date."""
+    try:
+        day = (case.get("game") or {}).get("release_date")
+        return datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return LAUNCH_FALLBACK
 
 
 def _is_completion(trophy):
-    name = (trophy.get("name") or "").lower()
-    desc = (trophy.get("description") or "").lower()
-    return "a long road" in name or "100% completion" in desc \
-        or "attain 100%" in desc
+    text = (trophy.get("name") or "") + " " + (trophy.get("description") or "")
+    return "100%" in text
 
 
-def parse_case(case):
-    """Return (trophies, series, n_series, cut, target, launch).
+def _fit_trophies(case, launch):
+    """Per-trophy weighted fits of logit(rate) on ln(1 + hours).
 
-    trophies: the case's trophy dicts in order. series: per trophy a
-    list of (epoch, rate_fraction, players_tracked_or_None). n_series:
-    [(epoch, players_tracked)] for the tracked population.
+    Returns (fits, last_rates): fits[i] holds trophy i's shrunk slope,
+    its fitted logit at the last read, its residual SD and whether the
+    trophy had no usable read and borrowed the cross-section's level.
     """
+    history = case.get("history") or []
+    trophies = case.get("trophies") or []
+    n = len(trophies)
+    if not history:
+        return ([{"slope": 0.0, "y_last": logit_frac(0.001), "resid": 0.60,
+                  "borrowed": True}] * n, [None] * n)
+
+    read_hours = []
+    for read in history:
+        h = (_parse_time(read["at"]) - launch).total_seconds() / 3600.0
+        read_hours.append(h)
+    t_last = read_hours[-1]
+    x_last = math.log1p(max(t_last, 0.0))
+
+    raw = []
+    for i in range(n):
+        xs, ys, ws = [], [], []
+        last_rate = None
+        for k, read in enumerate(history):
+            rates = read.get("rates") or []
+            rate = rates[i] if i < len(rates) else None
+            if rate is None:
+                continue
+            last_rate = rate
+            frac = min(max(rate / 100.0, FRAC_LO), FRAC_HI)
+            age = max(t_last - read_hours[k], 0.0)
+            xs.append(math.log1p(max(read_hours[k], 0.0)))
+            ys.append(logit_frac(frac))
+            ws.append(0.5 ** (age / HALF_LIFE_H))
+        if not xs:
+            raw.append(None)
+            continue
+        xbar, ybar, _a, b, resid = _wls(xs, ys, ws)
+        raw.append({"xbar": xbar, "ybar": ybar, "slope": b,
+                    "resid": resid, "weight": min(sum(ws), SHRINK_WEIGHT_CAP),
+                    "last": last_rate})
+
+    # The pooled slope: the week's common clock, weighted by how much
+    # each trophy's own fit counts for.
+    num = sum(r["weight"] * r["slope"] for r in raw if r)
+    den = sum(r["weight"] for r in raw if r)
+    pooled = num / den if den > 0 else 0.0
+
+    # A trophy with no usable read borrows the cross-section's level:
+    # the median fitted level of the trophies that do have reads.
+    levels = sorted(r["ybar"] for r in raw if r)
+    borrow = levels[len(levels) // 2] if levels else logit_frac(0.001)
+
+    fits = []
+    last_rates = []
+    for r in raw:
+        if r is None:
+            fits.append({"slope": pooled, "y_last": borrow, "resid": 0.60,
+                         "borrowed": True})
+            last_rates.append(None)
+            continue
+        w = r["weight"]
+        slope = (w * r["slope"] + SHRINK_PSEUDO * pooled) / (w + SHRINK_PSEUDO)
+        y_last = r["ybar"] + slope * (x_last - r["xbar"])
+        fits.append({"slope": slope, "y_last": y_last, "resid": r["resid"],
+                     "borrowed": False})
+        last_rates.append(r["last"])
+    return fits, last_rates
+
+
+def _median_logit(fit, ceiling, dx):
+    """The hybrid saturating extrapolation of one trophy's median."""
+    y0 = fit["y_last"]
+    b = fit["slope"]
+    cap = logit_frac(ceiling)
+    if dx <= 0:
+        return min(y0, cap) if b > SLOPE_EPS else y0
+    if b <= SLOPE_EPS or cap <= y0:
+        # No real climb to extrapolate (a constant series can fit a
+        # hair of positive slope on rounding alone), or the rate
+        # already sits above its tier's ceiling: a ceiling binds a
+        # forecast approaching from below, it never drags an observed
+        # rate down. Either way the move, if any, is at half strength.
+        return y0 + NEG_SLOPE_DAMPING * b * dx
+    line = min(y0 + LINE_DAMPING * b * dx, cap)
+    # Exponential approach to the ceiling, leaving at slope b.
+    lam = b / (cap - y0)
+    approach = cap - (cap - y0) * math.exp(-lam * dx)
+    return min(0.5 * (approach + line), cap)
+
+
+def _refresh_terms(case, launch):
+    """(weight, logit shift) for a refresh landing in the horizon.
+
+    The weight is the chance the answering page is a refreshed one the
+    checkpoint has not seen: the page's staleness against the refresh
+    cadence, over the horizon. The shift is the dilution a refresh
+    brings: the tracked population's expected jump, at 85% strength
+    because the new cohort earns some of the rate back.
+    """
+    history = case.get("history") or []
+    horizon_h = (case.get("horizon_minutes") or 0) / 60.0
+    if horizon_h <= 0 or horizon_h > REFRESH_MAX_HORIZON_H or len(history) < 2:
+        return 0.0, 0.0
+
+    times = [(_parse_time(r["at"]) - launch).total_seconds() / 3600.0
+             for r in history]
+    players = [r.get("players_tracked") for r in history]
+    events = [k for k in range(1, len(history))
+              if players[k] is not None and players[k - 1] is not None
+              and players[k] != players[k - 1]]
+    gaps = [times[events[j]] - times[events[j - 1]]
+            for j in range(1, len(events))]
+    if gaps:
+        gaps.sort()
+        cadence = gaps[len(gaps) // 2]
+    else:
+        cadence = REFRESH_PRIOR_CADENCE_H
+    if cadence <= 0:
+        return 0.0, 0.0
+
+    if events:
+        j_last = players[events[-1]] / players[events[-1] - 1]
+        jump = 1.0 + (j_last - 1.0) * REFRESH_JUMP_DECAY
+        page_since = times[events[-1]]
+    else:
+        jump = REFRESH_PRIOR_JUMP
+        page_since = times[0]
+    if jump <= 1.0:
+        return 0.0, 0.0
+
+    at_h = (_parse_time(case["at"]) - launch).total_seconds() / 3600.0
+    age = max(at_h - page_since, 0.0)
+    phase = age % cadence
+    to_next = cadence - phase if phase > 1e-9 else cadence
+    weight = min(horizon_h / max(to_next, 0.25), REFRESH_WEIGHT_CAP)
+    shift = DILUTION_EFFICIENCY * math.log(jump)
+    return weight, shift
+
+
+def _mixture_quantile(tau, mu_keep, mu_refresh, s_keep, s_refresh, w):
+    """The tau quantile of a two-component logit-normal mixture."""
+    lo = min(mu_keep, mu_refresh) - 10.0 * max(s_keep, s_refresh) - 3.0
+    hi = max(mu_keep, mu_refresh) + 10.0 * max(s_keep, s_refresh) + 3.0
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        cdf = (w * _norm_cdf((mid - mu_refresh) / s_refresh)
+               + (1.0 - w) * _norm_cdf((mid - mu_keep) / s_keep))
+        if cdf < tau:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def forecast_case(case, name="case"):
+    if case.get("levels") and list(case["levels"]) != LEVELS:
+        raise ValueError(f"{name} asks for levels {case['levels']}, not {LEVELS}")
+    launch = _launch_of(case)
     trophies = case.get("trophies") or []
     history = case.get("history") or []
-    cut = parse_time(case.get("at"))
-    target = parse_time(case.get("target"))
-    launch = None
-    game = case.get("game") or {}
-    if isinstance(game, dict) and game.get("release_date"):
-        launch = parse_time(game["release_date"] + "T00:00:00Z"
-                            if len(str(game["release_date"])) == 10
-                            else game["release_date"])
-    if launch is None:
-        launch = parse_time(LAUNCH_DEFAULT)
-    series = [[] for _ in trophies]
-    n_series = []
-    all_times = []
-    for read in history:
-        t = parse_time(read.get("at") or read.get("slot"))
-        if t is None:
-            continue
-        all_times.append(t)
-        n = read.get("players_tracked")
-        if isinstance(n, (int, float)) and n and n > 0:
-            n_series.append((t, float(n)))
-        rates = read.get("rates") or []
-        for i in range(min(len(trophies), len(rates))):
-            r = rates[i]
-            if r is None:
-                continue
-            try:
-                pct = float(r)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(pct):
-                continue
-            series[i].append((t, pct / 100.0,
-                              float(n) if isinstance(n, (int, float))
-                              and n and n > 0 else None))
-    if cut is None:
-        cut = max(all_times) if all_times else 0.0
-    if target is None:
-        horizon = case.get("horizon_minutes")
-        try:
-            target = cut + float(horizon) * 60.0
-        except (TypeError, ValueError):
-            target = cut + 4.5 * 24 * 3600.0
-    return trophies, series, n_series, cut, target, launch
+    fits, last_rates = _fit_trophies(case, launch)
 
-
-def refresh_stats(series, n_series, cut, target, launch):
-    """Learn the refresh process from the case's history.
-
-    Returns (p_refresh, log_jump, n_changes, staleness_h): p_refresh is
-    the probability that at least one refresh lands in the horizon when
-    the expected number of refreshes is small; log_jump is ln of the
-    rate multiplier a refresh applies (negative: rates fall); n_changes
-    counts the distinct plateaus; staleness_h is the hours since the
-    last change in the tracked population.
-    """
-    # Change points: reads where the tracked count moved.
-    change_times = []
-    prev_n = None
-    for t, n in n_series:
-        if prev_n is not None and n != prev_n:
-            change_times.append((t, n / prev_n))
-        prev_n = n
-    horizon_h = max((target - cut) / 3600.0, 0.0)
-    if change_times:
-        gaps = []
-        prev_t = n_series[0][0] if n_series else cut
-        for t, _ in change_times:
-            gaps.append((t - prev_t) / 3600.0)
-            prev_t = t
-        cadence = _weighted_median([(g, 1.0) for g in gaps if g > 0]) \
-            if any(g > 0 for g in gaps) else REFRESH_CADENCE_PRIOR_H
-        cadence = clamp(cadence, 0.5, 48.0)
-        jump = _weighted_median(
-            [(math.log(r), 1.0) for _, r in change_times if r > 0])
-        jump = clamp(jump, 0.0, math.log(50.0))
-        last_change = change_times[-1][0]
-        n_changes = len(change_times)
+    if history:
+        h_last = (_parse_time(history[-1]["at"]) - launch).total_seconds() / 3600.0
     else:
-        cadence = REFRESH_CADENCE_PRIOR_H
-        jump = math.log(REFRESH_JUMP_PRIOR)
-        last_change = n_series[0][0] if n_series else cut
-        n_changes = 0
-    staleness_h = max((cut - last_change) / 3600.0, 0.0)
-    expected = horizon_h / cadence if cadence > 0 else 0.0
-    # Chance of at least one refresh in the horizon. A purely memoryless
-    # (Poisson) hazard understates it here: refreshes come "hours apart",
-    # roughly periodic, so a page already stale for hours is overdue for
-    # its next refresh. The staleness term raises the hazard accordingly:
-    # with the page 3+ hours stale against a ~4.5 h cadence, a refresh
-    # inside a 90-minute horizon is more likely than not.
-    p = 1.0 - math.exp(-expected)
-    p = 1.0 - (1.0 - p) * math.exp(-staleness_h / cadence)
-    # The rate multiplier on a refresh: earners keep growing a little
-    # (new cohort) while the tracked population jumps, so rates fall
-    # by roughly the jump factor, softened by that earner growth.
-    log_jump_rate = -jump + math.log(REFRESH_NEW_EARNER_BOOST)
-    return p, log_jump_rate, n_changes, staleness_h, expected
+        h_last = 0.0
+    h_target = (_parse_time(case["target"]) - launch).total_seconds() / 3600.0
+    dx = max(math.log1p(max(h_target, 0.0)) - math.log1p(max(h_last, 0.0)), 0.0)
 
+    ceilings = [CEILING.get(t.get("tier"), CEILING_DEFAULT) for t in trophies]
+    medians = [_median_logit(fits[i], ceilings[i], dx) for i in range(len(trophies))]
 
-def forecast_case(case):
-    """Return {"trophies": [{"id": int, "q": [5 percents]}]} for one case."""
-    trophies, series, n_series, cut, target, launch = parse_case(case)
-    if not trophies:
-        return {"trophies": []}
+    # Cross-trophy discipline, walking down the last read's ranking:
+    # no median passes the trophy ahead of it by more than the slack.
+    order = sorted(range(len(trophies)),
+                   key=lambda i: -(last_rates[i] if last_rates[i] is not None
+                                   else 100.0 * inv_logit(fits[i]["y_last"])))
+    ahead = None
+    for i in order:
+        if ahead is not None:
+            medians[i] = min(medians[i], ahead + OVERTAKE_SLACK)
+        ahead = medians[i]
+    # The Platinum sits at or below the rarest other trophy's median.
+    plat = [i for i, t in enumerate(trophies) if t.get("tier") == "platinum"]
+    others = [medians[i] for i in range(len(trophies)) if i not in plat]
+    if plat and others:
+        floor = min(others)
+        for i in plat:
+            medians[i] = min(medians[i], floor)
+    # A 100%-completion trophy stays a grind: median at most 2%.
+    cap_completion = logit_frac(COMPLETION_MEDIAN_CAP)
+    for i, t in enumerate(trophies):
+        if _is_completion(t):
+            medians[i] = min(medians[i], cap_completion)
 
-    def x_of(t):
-        hours = max((t - launch) / 3600.0, 0.0)
-        return math.log1p(hours)
-
-    x_target = x_of(target)
-    p_refresh, log_jump_rate, n_changes, staleness_h, expected_refreshes = \
-        refresh_stats(series, n_series, cut, target, launch)
-    # The mixture matters only when the horizon holds few refreshes: over
-    # a long horizon refreshes average out into the smooth forecast.
-    use_mixture = expected_refreshes <= 2.0 and p_refresh >= 0.05
-
-    # --- tracked population: only its last value is used (as the
-    # earners fallback level); the forecast itself is a direct fit to
-    # the rates, because rates already carry the dilution: a refresh
-    # that jumps the tracked population shows up in the rates at once.
-    # (An earners / players decomposition was tried first — extrapolate
-    # log earners and log players separately, then divide — and lost
-    # decisively on synthetic validation in every regime: the players
-    # series is a step function, so its extrapolation is the noisiest
-    # part of the forecast, and the rate fit absorbs dilution into its
-    # slope with far less error. It was removed.)
-    n_last = n_series[-1][1] if n_series else None
-
-    # --- per-trophy fits: logit(rate) against ln(1 + hours) ---
-    fits = []
-    slope_pairs_rate = []
-    last_rates = sorted(
-        s[-1][1] for s in series if s and 0.0 <= s[-1][1] <= 1.0)
-    prior_p = last_rates[len(last_rates) // 2] if last_rates else 0.001
-    for idx, trophy in enumerate(trophies):
-        obs = series[idx]
-        clean = [(t, clamp(r, P_FLOOR, P_CEIL), n)
-                 for t, r, n in obs if math.isfinite(t)]
-        if not clean:
-            clean = [(cut, clamp(prior_p, P_FLOOR, P_CEIL), n_last)]
-        xs = [x_of(t) for t, _, _ in clean]
-        ys_rate = [logit_frac(r) for _, r, _ in clean]
-        ws = [1.0 + i for i in range(len(xs))]
-        fit_rate = _ols(xs, ys_rate, ws)
-        if fit_rate is None:
-            a_r, b_r, resid_r = ys_rate[-1], 0.0, 0.0
-        else:
-            a_r, b_r, resid_r = fit_rate
-        x_last = xs[-1]
-        y_fit_last = a_r + b_r * x_last
-        fits.append([trophy, clean, a_r, b_r, resid_r, x_last, y_fit_last])
-        spread = max(xs) - min(xs) if len(xs) > 1 else 0.0
-        if len(xs) > 1 and spread > 0.05:
-            slope_pairs_rate.append(
-                (b_r, min(len(xs), MAX_READ_WEIGHT) * spread))
-    global_slope_rate = clamp(_weighted_median(slope_pairs_rate), 0.0, 3.0) \
-        if slope_pairs_rate else 1.0
-
-    medians = {}
-    sigmas = {}
-    p_last_map = {}
-    for entry in fits:
-        trophy, clean, a_r, b_r, resid_r, x_last, y_fit_last = entry
-        tid = trophy["id"]
-        n_eff = min(len(clean), MAX_READ_WEIGHT)
-        b_star = (n_eff * b_r + SHRINK_K * global_slope_rate) \
-            / (n_eff + SHRINK_K)
-        b_star = clamp(b_star, -0.5, 4.0)
-        p_last = clean[-1][1]
-        p_last_map[tid] = p_last
-        dx = max(x_target - x_last, 0.0)
-        ceil = _ceiling(trophy.get("tier"), trophy.get("name"), p_last)
-        y_ceil = logit_frac(ceil)
-        # Direct rate extrapolation: average of an exponential approach
-        # to the ceiling and a damped straight line in log-time, capped
-        # at the ceiling.
-        if b_star > 0.02:
-            if y_fit_last < y_ceil:
-                gap = y_ceil - y_fit_last
-                y_exp = y_ceil - gap * math.exp(-b_star * dx / gap)
-            else:
-                y_exp = y_ceil
-            y_lin = min(y_fit_last + 0.9 * b_star * dx, y_ceil)
-            y_med = (1.0 - LIN_W) * y_exp + LIN_W * y_lin
-        else:
-            y_med = y_fit_last + 0.5 * b_star * dx
-        y_med = clamp(y_med, logit_frac(P_FLOOR), logit_frac(P_CEIL))
-        medians[tid] = y_med
-        sigma = math.sqrt(SIGMA_BASE ** 2 + (SIGMA_PER_DX * dx) ** 2
-                          + min(resid_r, 0.5) ** 2)
-        if n_changes > 0:
-            sigma = math.sqrt(sigma ** 2 + SIGMA_STEP ** 2)
-        if p_last < 0.002:
-            sigma += 0.20
-        if len(clean) < 3:
-            sigma += 0.15
-        sigmas[tid] = clamp(sigma, SIGMA_MIN, SIGMA_MAX)
-
-    # Cross-trophy structure, in last-read order (highest first).
-    order = sorted(fits, key=lambda e: (-p_last_map[e[0]["id"]],
-                                        e[0]["id"]))
-    prev = None
-    for entry in order:
-        tid = entry[0]["id"]
-        if prev is not None:
-            medians[tid] = min(medians[tid], prev + DOMINANCE_SLACK)
-        prev = medians[tid]
-    # Platinum cannot exceed any other trophy; 100% completion is capped.
-    others = [medians[e[0]["id"]] for e in fits
-              if not _is_platinum(e[0])]
-    for entry in fits:
-        tid = entry[0]["id"]
-        if _is_platinum(entry[0]) and others:
-            medians[tid] = min(medians[tid], min(others))
-        if _is_completion(entry[0]):
-            medians[tid] = min(medians[tid], logit_frac(COMPLETION_CAP))
+    w_refresh, shift = _refresh_terms(case, launch)
 
     rows = []
-    for entry in fits:
-        trophy = entry[0]
-        tid = trophy["id"]
-        m = medians[tid]
-        s = sigmas[tid]
-        p_last = p_last_map[tid]
-        if use_mixture and p_last < 0.999:
-            # Two outcomes: no refresh (median m) or one refresh
-            # (rates fall by the jump factor). Quantiles of the mixture.
-            m1 = m + log_jump_rate
-            ys = mixture_quantiles(m, s, m1, p_refresh, QUANTILES)
-            qs = [sigmoid(y) * 100.0 for y in ys]
-        else:
-            qs = [sigmoid(m + z * s) * 100.0 for z in Z]
-        qs = [round4(clamp(q, 0.01, 99.99)) for q in qs]
-        for i in range(1, 5):
-            if qs[i] < qs[i - 1]:
-                qs[i] = qs[i - 1]
-        rows.append({"id": tid, "q": qs})
+    for i, trophy in enumerate(trophies):
+        sigma = math.sqrt(SIGMA_BASE ** 2 + (SIGMA_PER_DX * dx) ** 2
+                          + fits[i]["resid"] ** 2)
+        last = last_rates[i]
+        if last is not None and last < 0.15:
+            sigma += 0.12   # 0.01%-quantised rates carry print noise
+        elif last is not None and last < 0.40:
+            sigma += 0.06
+        if fits[i]["borrowed"]:
+            sigma += 0.10
+        sigma = min(max(sigma, SIGMA_LO), SIGMA_HI)
+
+        mu = medians[i]
+        # A refresh does not dilute a trophy everyone already holds.
+        diluted = (w_refresh > 0.02 and shift > 0.05
+                   and not (last is not None and last >= 99.99))
+        qs = []
+        for tau, z in zip(LEVELS, Z):
+            if diluted:
+                y = _mixture_quantile(tau, mu, mu - shift, sigma,
+                                      sigma * REFRESH_SIGMA_SCALE, w_refresh)
+            else:
+                y = mu + z * sigma
+            qs.append(100.0 * inv_logit(y))
+        qs = [round4(q) for q in qs]
+        for k in range(1, len(qs)):  # rounding must not invert a row
+            if qs[k] < qs[k - 1]:
+                qs[k] = qs[k - 1]
+        rows.append({"id": trophy["id"], "q": qs})
     return {"trophies": rows}
 
 
 def main():
-    input_dir = os.environ.get("MAKEFUN_INPUT_DIR", "/input")
-    output_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(output_dir, exist_ok=True)
-    names = sorted(n for n in os.listdir(input_dir) if n.endswith(".in"))
-    for name in names:
-        case_id = name[:-len(".in")]
-        with open(os.path.join(input_dir, name), "r", encoding="utf-8") as fh:
-            case = json.load(fh)
-        payload = forecast_case(case)
-        out_path = os.path.join(output_dir, case_id + ".out")
-        with open(out_path, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, separators=(",", ":")))
-            fh.write("\n")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Every case file, in name order, so two runs write the same bytes.
+    for path in sorted(INPUT_DIR.glob("*.in")):
+        case = json.loads(path.read_text(encoding="utf-8"))
+        forecast = forecast_case(case, path.name)
+        (OUTPUT_DIR / f"{path.stem}.out").write_text(
+            json.dumps(forecast, separators=(",", ":")) + "\n",
+            encoding="utf-8")
 
 
 if __name__ == "__main__":

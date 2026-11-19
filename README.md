@@ -89,17 +89,17 @@ refreshes. 20 seeds, final cut 21 Nov 11:30 UTC -> target 26 Nov
 
 | regime | model | flat | trend |
 |---|---|---|---|
-| final | **0.178** | 0.619 | 0.372 |
-| final, day-7 rates x1.3 | **0.191** | 0.645 | 0.407 |
+| final | **0.176** | 0.619 | 0.372 |
+| final, day-7 rates x1.3 | **0.180** | 0.645 | 0.407 |
 | final, day-7 rates x0.7 | **0.170** | 0.573 | 0.350 |
-| practice (1 refresh in horizon) | **0.261** | 1.176 | 1.176 |
+| practice (1 refresh in horizon) | **0.170** | 1.176 | 1.176 |
 
 The model beats both house baselines in every regime. On the real
 practice cut, with answers reconstructed from the documented refresh
 (638 -> 3,868 players, 943 -> 4,276 trophies earned; the 3,230 new
 players' trophies split proportional to the pre-refresh earners),
-**model 0.210 vs flat 1.401** (house-stated flat practice loss: 1.51;
-typical miss 0.006pp vs 0.68pp, coverage 0.98 vs 0). The exact
+**model 0.101 vs flat 1.401** (house-stated flat practice loss: 1.51;
+typical miss 0.009pp vs 0.68pp, coverage 0.98 vs 0). The exact
 practice answers are sealed, so these are estimated-answer numbers;
 the flat cross-check (1.40 vs the house's stated 1.51) is consistent
 within ~0.15. The same harness (`work/validate.py`, kept out of the
